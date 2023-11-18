@@ -7,6 +7,7 @@ const localUsername = process.env.LOCAL_USERNAME;
 const localPassword = process.env.LOCAL_PASSWORD;
 const purgeOlderThanDays = parseInt(process.env.PURGE_OLDER_THAN_DAYS);
 const hoursBetweenPurges = parseInt(process.env.HOURS_BETWEEN_PURGES);
+const purgeBatchSize = parseInt(process.env.PURGE_BATCH_SIZE) || 100;
 
 const purgePictrsOlderThanDays = process.env.PICTRS_RM_OLDER_THAN_DAYS ? parseInt(process.env.PICTRS_RM_OLDER_THAN_DAYS) : null;
 const pictrsServerApiToken = process.env.PICTRS_SERVER_API_TOKEN ? process.env.PICTRS_SERVER_API_TOKEN : null;
@@ -115,7 +116,8 @@ async function getPosts() {
         SELECT post_id
         FROM comment
         WHERE published >= NOW() - INTERVAL '${purgeOlderThanDays} days'
-    );
+    )
+    LIMIT ${purgeBatchSize};
   `, [
     `${localUrl}%`,
   ]);
@@ -124,29 +126,39 @@ async function getPosts() {
 
 async function main() {
   while (true) {
-    let localClient = new LemmyHttp(localUrl);
-    let loginForm = {
-      username_or_email: localUsername,
-      password: localPassword,
-    };
-    let user = await localClient.login(loginForm);
-    let posts = await getPosts();
-    let l = posts.length;
-    console.log(`Purging ${l} posts older than ${purgeOlderThanDays} days`);
-    for await (const [i, post] of posts.entries()) {
-      console.log(`Purging post ${post.id} (${i+1}/${l})`);
-      await localClient.purgePost({
-        post_id: post.id,
-        reason: `LPP - Older than ${purgeOlderThanDays} days`,
-        auth: user.jwt,
-      });
+    try {
+      let localClient = new LemmyHttp(localUrl);
+      let loginForm = {
+        username_or_email: localUsername,
+        password: localPassword,
+      };
+      let user = await localClient.login(loginForm);
+      let posts = await getPosts();
+      let l = posts.length;
+      console.log(`Purging ${l} posts older than ${purgeOlderThanDays} days`);
+      for await (const [i, post] of posts.entries()) {
+        console.log(`Purging post ${post.id} (${i + 1}/${l})`);
+        try {
+          await localClient.purgePost({
+            post_id: post.id,
+            reason: `LPP - Older than ${purgeOlderThanDays} days`,
+            auth: user.jwt,
+          });
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      if (l < purgeBatchSize) {
+        if (purgePictrsOlderThanDays && pictrsServerApiToken && pictrsUrl) {
+          console.log(`Purging images older than ${purgePictrsOlderThanDays} days`);
+          await purgePictrs(pool);
+        }
+        console.log(`Sleeping ${hoursBetweenPurges} hours`);
+        await sleep(hoursBetweenPurges * 60 * 60);
+      }
+    } catch (e) {
+      console.error(e);
     }
-    if (purgePictrsOlderThanDays && pictrsServerApiToken && pictrsUrl) {
-      console.log(`Purging images older than ${purgePictrsOlderThanDays} days`);
-      await purgePictrs(pool);
-    }
-    console.log(`Sleeping ${hoursBetweenPurges} hours`);
-    await sleep(hoursBetweenPurges * 60 * 60);
   }
 }
 
